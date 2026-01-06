@@ -37,6 +37,7 @@ class RealtimeSupervisor:
     def __init__(self) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
         self._mongo_client: AsyncIOMotorClient | None = None
+        self._signals_client: SignalsHttpClient | None = None
         self._db = None
 
         self._ws_clients: list[BinanceWebsocketClient] = []
@@ -90,6 +91,8 @@ class RealtimeSupervisor:
 
         self._logger.info("Starting ingestion source=%s symbols=%s interval=%s", source, symbols, interval)
 
+        self._signals_client = SignalsHttpClient(base_url=settings.SIGNALS_BASE_URL, timeout_s=30.0)
+        
         for symbol in symbols:
             if settings.ENABLE_BACKFILL_ON_START:
                 try:
@@ -98,7 +101,7 @@ class RealtimeSupervisor:
                     self._logger.exception("Backfill error for %s@%s: %s", symbol, interval, exc)
 
             ws_client = BinanceWebsocketClient(base_ws_url=settings.BINANCE_WS_BASE_URL)
-            signals_client = SignalsHttpClient(base_url=settings.SIGNALS_BASE_URL)
+            
             
             ingestion_uc = StartRealtimeIngestionUseCase(
                 source=source,
@@ -110,7 +113,7 @@ class RealtimeSupervisor:
                 compute_indicators_use_case=compute_indicators_uc,
                 indicator_set_repo=indicator_set_repo,
                 logger=None,
-                signals_client=signals_client
+                signals_client=self._signals_client
             )
 
             self._ws_clients.append(ws_client)
@@ -131,3 +134,7 @@ class RealtimeSupervisor:
 
         if self._mongo_client:
             self._mongo_client.close()
+
+        if self._signals_client is not None:
+            await self._signals_client.aclose()
+            self._signals_client = None

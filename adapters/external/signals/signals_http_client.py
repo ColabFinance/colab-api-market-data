@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+
 import httpx
 
 
 class SignalsHttpClient:
-    def __init__(self, *, base_url: str, timeout_s: float = 10.0):
+    def __init__(self, *, base_url: str, timeout_s: float = 30.0):
         self._base_url = str(base_url).rstrip("/")
-        self._timeout = timeout_s
+        self._timeout = httpx.Timeout(timeout_s, connect=5.0)
+
+        # Reuse connections (important for high-frequency calls)
+        self._client = httpx.AsyncClient(timeout=self._timeout)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
     async def candle_closed(
         self,
@@ -24,7 +31,6 @@ class SignalsHttpClient:
             "indicator_snapshot": indicator_snapshot,
         }
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            r = await client.post(f"{self._base_url}/triggers/candle-closed", json=payload)
-            r.raise_for_status()
-            return r.json()
+        r = await self._client.post(f"{self._base_url}/triggers/candle-closed", json=payload)
+        r.raise_for_status()
+        return r.json()
