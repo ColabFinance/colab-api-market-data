@@ -31,6 +31,6 @@ class SignalsHttpClient:
             "indicator_snapshot": indicator_snapshot,
         }
 
-        r = await self._client.post(f"{self._base_url}/triggers/candle-closed", json=payload)
+        r = await self._client.post(f"{self._base_url}/api/triggers/candle-closed", json=payload)
         r.raise_for_status()
         return r.json()
