@@ -36,5 +36,25 @@ class Settings:
     BOOTSTRAP_BINANCE_STREAM_SYMBOLS: str = os.getenv("BOOTSTRAP_BINANCE_STREAM_SYMBOLS", "btcusdt")
     BOOTSTRAP_ENABLE_BACKFILL_ON_START: bool = os.getenv("BOOTSTRAP_ENABLE_BACKFILL_ON_START", "true").lower() == "true"
 
+    # The Graph (defaults for adapters)
+    THEGRAPH_GATEWAY_BASE_URL: str = os.getenv(
+        "THEGRAPH_GATEWAY_BASE_URL",
+        "https://gateway.thegraph.com/api/subgraphs/id/",
+    )
+    THEGRAPH_DEFAULT_TIMEOUT_S: float = float(os.getenv("THEGRAPH_DEFAULT_TIMEOUT_S", "20.0"))
+    THEGRAPH_HTTP_CONNECT_TIMEOUT_S: float = float(os.getenv("THEGRAPH_HTTP_CONNECT_TIMEOUT_S", "5.0"))
+
+    # PancakeSwap V3 (Base) subgraph id (default used across the service)
+    THEGRAPH_PANCAKESWAP_V3_BASE_SUBGRAPH_ID: str = os.getenv(
+        "THEGRAPH_PANCAKESWAP_V3_BASE_SUBGRAPH_ID",
+        "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3",
+    )
+
+    # Symbols treated as USD-stable when resolving token USD price.
+    # You can extend this without redeploy by registering quote tokens explicitly.
+    USD_STABLE_SYMBOLS: set[str] = set(
+        [s.strip().upper() for s in os.getenv("USD_STABLE_SYMBOLS", "USDC,USDT,DAI,USDBC").split(",") if s.strip()]
+    )
+
 
 settings = Settings()

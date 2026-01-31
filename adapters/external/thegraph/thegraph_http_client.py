@@ -16,10 +16,17 @@ class TheGraphHttpClient:
       Bearer {api_key}
     """
 
-    def __init__(self, *, endpoint: str, api_key: str, timeout_s: float = 20.0) -> None:
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        api_key: str,
+        timeout_s: float = 20.0,
+        connect_timeout_s: float = 5.0,
+    ) -> None:
         self._endpoint = str(endpoint).strip()
         self._api_key = str(api_key).strip()
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=5.0))
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout_s, connect=connect_timeout_s))
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -29,11 +36,16 @@ class TheGraphHttpClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
         }
-        payload = {
-            "query": query,
-            "variables": variables or {},
-        }
+        payload = {"query": query, "variables": variables or {}}
+
         r = await self._client.post(self._endpoint, headers=headers, json=payload)
         r.raise_for_status()
-        data = r.json()
+        data = r.json() or {}
+
+        # Surface GraphQL errors explicitly
+        errors = data.get("errors")
+        if errors:
+            msg = str(errors[0].get("message") or "thegraph_query_failed")
+            raise RuntimeError(f"TheGraph error: {msg}")
+
         return data

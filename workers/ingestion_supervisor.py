@@ -18,6 +18,7 @@ from adapters.external.database.system_config_repository_mongodb import SystemCo
 
 from adapters.external.binance.binance_rest_client import BinanceRestClient
 from adapters.external.binance.binance_websocket_client import BinanceWebsocketClient
+from adapters.external.database.token_registry_repository_mongodb import TokenRegistryRepositoryMongoDB
 from adapters.external.signals.signals_http_client import SignalsHttpClient
 
 from adapters.external.thegraph.pancakeswap_v3_base_pool_client import PancakeSwapV3BasePoolClient
@@ -91,6 +92,10 @@ class IngestionSupervisor:
         streams_repo = IngestionStreamRepositoryMongoDB(self._db)
         await streams_repo.ensure_indexes()
 
+        # Token registry (for on-demand pricing)
+        token_registry_repo = TokenRegistryRepositoryMongoDB(self._db)
+        await token_registry_repo.ensure_indexes()
+        
         # Ensure runtime config exists (or create fallback)
         runtime_cfg = await system_repo.get_runtime()
         if runtime_cfg is None:
@@ -141,8 +146,6 @@ class IngestionSupervisor:
             await uc.execute()
 
         # Start poll loops
-        # for puc in self._poll_ingestions:
-        #     await puc.start()
         for t in self._tick_pollers:
             t.start()
     
@@ -310,16 +313,6 @@ class IngestionSupervisor:
     ) -> None:
         """
         Start a The Graph polling ingestion stream for PancakeSwap V3 Base pool.
-
-        Pricing convention used here:
-        - We want the spot price of **WETH per 1 USDC** (WETH/USDC),
-            i.e. how much WETH you get for 1 USDC.
-        - In V3 subgraphs:
-            token0Price = token1 per token0
-            token1Price = token0 per token1
-            Therefore, if token0=WETH and token1=USDC:
-            token1Price = WETH per USDC  ✅ (this is what we want)
-            token0Price = USDC per WETH
         """
         api_key = (runtime_cfg.thegraph_api_key or "").strip()
         if not api_key:
@@ -370,28 +363,17 @@ class IngestionSupervisor:
 
             # We want: WETH per 1 USDC
             if token0_symbol.upper() == "WETH" and token1_symbol.upper() == "USDC":
-                # token1Price = token0 per token1 = WETH per USDC ✅
                 if token1_price is None:
                     raise ValueError("token1Price is missing from pool response (expected for WETH/USDC)")
                 price = float(token1_price)
 
             elif token0_symbol.upper() == "USDC" and token1_symbol.upper() == "WETH":
-                # token0Price = token1 per token0 = WETH per USDC ✅
                 if token0_price is None:
                     raise ValueError("token0Price is missing from pool response (expected for USDC/WETH)")
                 price = float(token0_price)
 
             else:
-                # Generic fallback:
-                # Prefer whichever side gives "WETH per USDC" if either token is WETH and the other is USDC,
-                # otherwise fallback to token1Price when present.
-                if token0_symbol.upper() == "WETH" and token0_price is not None:
-                    # token0Price = token1 per token0 => (other per WETH). We need WETH per other => invert.
-                    price = 1.0 / float(token0_price)
-                elif token1_symbol.upper() == "WETH" and token1_price is not None:
-                    # token1Price = token0 per token1 => (other per WETH). We need WETH per other => invert.
-                    price = 1.0 / float(token1_price)
-                elif token1_price is not None:
+                if token1_price is not None:
                     price = float(token1_price)
                 elif token0_price is not None:
                     price = float(token0_price)
@@ -438,7 +420,7 @@ class IngestionSupervisor:
             stream_key=stream_key,
             source=stream.source_name,
             symbol=stream.symbol,
-            interval=stream.interval,  # "1m"
+            interval=stream.interval,
             poll_every_s=poll_every_s,
             tick_repository=tick_repo,
             build_candle_uc=build_candle_uc,

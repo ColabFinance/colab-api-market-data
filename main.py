@@ -3,10 +3,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from adapters.entry.http.admin_router import router as admin_router
-from adapters.entry.http.admin_config_router import router as admin_config_router
 from config.settings import settings
 from workers.ingestion_supervisor import IngestionSupervisor
+
+from adapters.entry.http.admin_router import router as admin_router
+from adapters.entry.http.admin_config_router import router as admin_config_router
+from adapters.entry.http.admin_token_router import router as admin_token_router
+from adapters.entry.http.token_pricing_router import router as token_pricing_router
 
 
 def _setup_logging() -> None:
@@ -29,6 +32,8 @@ async def lifespan(app: FastAPI):
 
     app.include_router(admin_router)
     app.include_router(admin_config_router)
+    app.include_router(admin_token_router)
+    app.include_router(token_pricing_router)
     
     try:
         yield
