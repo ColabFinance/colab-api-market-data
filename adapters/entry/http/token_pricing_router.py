@@ -46,6 +46,7 @@ async def get_token_price_usd(
             quote_token_is_usd_stable=res.quote_token_is_usd_stable,
             price_in_quote=str(res.price_in_quote),
             pool_address=res.pool_address,
+            decimals=int(res.decimals),
         )
     except LookupError as exc:
         msg = str(exc)
