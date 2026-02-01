@@ -30,10 +30,10 @@ async def lifespan(app: FastAPI):
     await supervisor.start()
     app.state.db = supervisor.db
 
-    app.include_router(admin_router)
-    app.include_router(admin_config_router)
-    app.include_router(admin_token_router)
-    app.include_router(token_pricing_router)
+    app.include_router(admin_router, prefix="/api")
+    app.include_router(admin_config_router, prefix="/api")
+    app.include_router(admin_token_router, prefix="/api")
+    app.include_router(token_pricing_router, prefix="/api")
     
     try:
         yield
