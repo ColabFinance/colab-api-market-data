@@ -1,28 +1,34 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from adapters.external.thegraph.thegraph_http_client import TheGraphHttpClient
+from config.settings import settings
 
 
 class PancakeSwapV3BasePoolClient:
     """
     Client for PancakeSwap V3 on Base via The Graph Gateway.
 
-    Subgraph:
-      https://gateway.thegraph.com/api/subgraphs/id/BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3
+    Default subgraph id is configured in settings:
+      settings.THEGRAPH_PANCAKESWAP_V3_BASE_SUBGRAPH_ID
     """
 
-    SUBGRAPH_ENDPOINT = (
-        "https://gateway.thegraph.com/api/subgraphs/id/"
-        "BHWNsedAHtmTCzXxCCDfhPmm6iN9rxUhoRHdHKyujic3"
-    )
-
-    def __init__(self, *, api_key: str, timeout_s: float = 20.0) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout_s: Optional[float] = None,
+        subgraph_id: Optional[str] = None,
+        endpoint: Optional[str] = None,
+    ) -> None:
+        sg = (subgraph_id or settings.THEGRAPH_PANCAKESWAP_V3_BASE_SUBGRAPH_ID).strip()
+        ep = (endpoint or f"{settings.THEGRAPH_GATEWAY_BASE_URL}{sg}").strip()
         self._http = TheGraphHttpClient(
-            endpoint=self.SUBGRAPH_ENDPOINT,
+            endpoint=ep,
             api_key=api_key,
-            timeout_s=timeout_s,
+            timeout_s=float(timeout_s or settings.THEGRAPH_DEFAULT_TIMEOUT_S),
+            connect_timeout_s=float(settings.THEGRAPH_HTTP_CONNECT_TIMEOUT_S),
         )
 
     async def aclose(self) -> None:
@@ -53,6 +59,6 @@ class PancakeSwapV3BasePoolClient:
           }
         }
         """
-        pool_id = str(pool_address).lower()
+        pool_id = str(pool_address).lower().strip()
         res = await self._http.query(query=q, variables={"id": pool_id})
         return (res or {}).get("data", {}).get("pool") or {}
