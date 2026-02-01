@@ -85,3 +85,5 @@ class TokenPriceOutDTO(BaseModel):
     quote_token_is_usd_stable: bool
     price_in_quote: str = Field(..., description="Decimal string")
     pool_address: str
+
+    decimals: int = Field(..., description="Token decimals (from registry/pool)")

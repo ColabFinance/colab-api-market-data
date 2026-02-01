@@ -60,7 +60,7 @@ class TokenPriceResult:
     quote_token_is_usd_stable: bool
     price_in_quote: Decimal
     pool_address: str
-
+    decimals: int
 
 class TokenPricingUseCase:
     """
@@ -214,15 +214,21 @@ class TokenPricingUseCase:
         if not token0_addr or not token1_addr:
             raise ValueError("pool_token_sides_missing")
 
-        # Prefer deterministic math via sqrtPriceX96
-        sqrt_price_raw = pool.get("sqrtPrice")
         decimals0 = ent.token0_decimals
         decimals1 = ent.token1_decimals
         if decimals0 is None or decimals1 is None:
             raise ValueError("registry_missing_decimals")
 
+        if ent.token_address == token0_addr:
+            token_decimals = int(decimals0)
+        elif ent.token_address == token1_addr:
+            token_decimals = int(decimals1)
+        else:
+            raise ValueError("token_not_in_pool")
+        
         price_in_quote: Decimal | None = None
 
+        sqrt_price_raw = pool.get("sqrtPrice")
         if sqrt_price_raw is not None:
             sqrt_price_x96 = _to_int(sqrt_price_raw, field="sqrtPrice")
 
@@ -284,6 +290,7 @@ class TokenPricingUseCase:
                 quote_token_is_usd_stable=True,
                 price_in_quote=price_in_quote,
                 pool_address=ent.pool_address,
+                decimals=token_decimals,
             )
 
         # Otherwise resolve quote token USD recursively
@@ -302,4 +309,5 @@ class TokenPricingUseCase:
             quote_token_is_usd_stable=False,
             price_in_quote=price_in_quote,
             pool_address=ent.pool_address,
+            decimals=token_decimals,
         )
