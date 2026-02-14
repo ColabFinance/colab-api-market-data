@@ -31,3 +31,24 @@ class IndicatorSetRepository(ABC):
     async def get_by_id(self, cfg_hash: str) -> Optional[IndicatorSetEntity]:
         """Get an indicator set by cfg_hash."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def filter(
+        self,
+        *,
+        stream_key: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 5000,
+    ) -> List[IndicatorSetEntity]:
+        """
+        Filter indicator sets by optional fields.
+
+        Args:
+            stream_key: Optional stream_key filter.
+            status: Optional status filter.
+            limit: Max items to return.
+
+        Returns:
+            List of IndicatorSetEntity.
+        """
+        raise NotImplementedError

@@ -2,11 +2,12 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from config.settings import settings
 from workers.ingestion_supervisor import IngestionSupervisor
 
-from adapters.entry.http.admin_router import router as admin_router
+from adapters.entry.http.market_data_router import router as market_data_router
 from adapters.entry.http.admin_config_router import router as admin_config_router
 from adapters.entry.http.admin_token_router import router as admin_token_router
 from adapters.entry.http.token_pricing_router import router as token_pricing_router
@@ -30,7 +31,7 @@ async def lifespan(app: FastAPI):
     await supervisor.start()
     app.state.db = supervisor.db
 
-    app.include_router(admin_router, prefix="/api")
+    app.include_router(market_data_router, prefix="/api")
     app.include_router(admin_config_router, prefix="/api")
     app.include_router(admin_token_router, prefix="/api")
     app.include_router(token_pricing_router, prefix="/api")
@@ -44,6 +45,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="api-market-data", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "*",
+        "*",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],  # inclui OPTIONS
+    allow_headers=["*"],  # inclui Authorization, Content-Type
+)
+    
 
 @app.get("/healthz")
 async def healthz():
