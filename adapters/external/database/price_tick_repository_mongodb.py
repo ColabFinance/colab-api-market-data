@@ -28,17 +28,16 @@ class PriceTickRepositoryMongoDB(PriceTickRepository):
         # Fast range queries for building a candle
         await col.create_index([("stream_key", 1), ("minute_open_time", 1), ("ts", 1)])
 
-        # Optional: keep ticks only for a short window (e.g. 2 hours)
-        # Requires a Date field. If you want TTL, store ts_iso and index it.
-        # (Skipping TTL here to keep it simple and avoid schema changes.)
+        # Fast range queries for episode/tick analytics (APR in-range time)
+        await col.create_index([("stream_key", 1), ("ts", 1)])
 
     async def insert_tick(self, tick: PriceTickEntity) -> None:
         now_iso = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
         tick.created_at_iso = now_iso
-        
+
         col = self._db[self.COLLECTION]
         payload = tick.to_mongo()
-        
+
         # do NOT upsert by minute: we want every sample tick
         await col.insert_one(payload)
 
@@ -49,6 +48,27 @@ class PriceTickRepositoryMongoDB(PriceTickRepository):
             .sort("ts", 1)
         )
         docs = await cur.to_list(length=10_000)
+        return [PriceTickEntity.from_mongo(d) for d in docs if d]
+
+    async def list_ticks_range(
+        self,
+        stream_key: str,
+        ts_from: int,
+        ts_to: int,
+        limit: int = 5000,
+    ) -> List[PriceTickEntity]:
+        col = self._db[self.COLLECTION]
+        cur = (
+            col.find(
+                {
+                    "stream_key": str(stream_key),
+                    "ts": {"$gte": int(ts_from), "$lte": int(ts_to)},
+                }
+            )
+            .sort("ts", 1)
+            .limit(int(limit))
+        )
+        docs = await cur.to_list(length=int(limit))
         return [PriceTickEntity.from_mongo(d) for d in docs if d]
 
     async def delete_ticks_for_minute(self, stream_key: str, minute_open_time: int) -> None:

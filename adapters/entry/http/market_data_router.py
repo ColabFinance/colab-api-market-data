@@ -5,9 +5,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from adapters.entry.http.dtos.price_tick_dtos import PriceTickOutDTO
 from adapters.external.database.candle_repository_mongodb import CandleRepositoryMongoDB
 from adapters.external.database.indicator_repository_mongodb import IndicatorRepositoryMongoDB
 from adapters.external.database.indicator_set_repository_mongodb import IndicatorSetRepositoryMongoDB
+from adapters.external.database.price_tick_repository_mongodb import PriceTickRepositoryMongoDB
+
 from core.usecases.market_data_use_case import MarketDataUseCase
 
 from .deps import get_db
@@ -122,3 +125,30 @@ async def list_indicators(
 
     snaps = await uc.list_indicators(stream_key=stream_key, cfg_hash=cfg_hash, limit=int(limit))
     return [IndicatorSnapshotOutDTO.model_validate(s.model_dump()) for s in snaps]
+
+
+@router.get("/price-ticks", response_model=List[PriceTickOutDTO])
+async def list_price_ticks(
+    stream_key: str = Query(...),
+    ts_from: int = Query(..., description="ms since epoch"),
+    ts_to: int = Query(..., description="ms since epoch"),
+    limit: int = Query(5000, ge=1, le=200_000),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> List[PriceTickOutDTO]:
+    """
+    List price ticks in an arbitrary time range.
+    Used by APR calculations (in-range seconds) and analytics.
+    """
+    try:
+        repo = PriceTickRepositoryMongoDB(db)
+        await repo.ensure_indexes()
+
+        ticks = await repo.list_ticks_range(
+            stream_key=str(stream_key),
+            ts_from=int(ts_from),
+            ts_to=int(ts_to),
+            limit=int(limit),
+        )
+        return [PriceTickOutDTO.model_validate(t.model_dump()) for t in ticks]
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list price ticks: {exc}") from exc
