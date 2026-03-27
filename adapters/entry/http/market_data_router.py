@@ -9,24 +9,45 @@ from adapters.entry.http.dtos.price_tick_dtos import PriceTickOutDTO
 from adapters.external.database.candle_repository_mongodb import CandleRepositoryMongoDB
 from adapters.external.database.indicator_repository_mongodb import IndicatorRepositoryMongoDB
 from adapters.external.database.indicator_set_repository_mongodb import IndicatorSetRepositoryMongoDB
+from adapters.external.database.ingestion_stream_repository_mongodb import IngestionStreamRepositoryMongoDB
 from adapters.external.database.price_tick_repository_mongodb import PriceTickRepositoryMongoDB
-
+from core.services.stream_key_service import StreamKeyService
 from core.usecases.market_data_use_case import MarketDataUseCase
 
 from .deps import get_db
 from .dtos.candle_dtos import CandleOutDTO
 from .dtos.indicator_dtos import IndicatorSnapshotOutDTO
 from .dtos.indicator_set_dtos import IndicatorSetCreateDTO, IndicatorSetOutDTO
+from .dtos.ingestion_stream_dtos import IngestionStreamReadOutDTO
 
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
 
 def get_use_case(db: AsyncIOMotorDatabase) -> MarketDataUseCase:
+    """
+    Build the main market-data use case with MongoDB repositories.
+    """
     return MarketDataUseCase(
         candle_repo=CandleRepositoryMongoDB(db),
         indicator_repo=IndicatorRepositoryMongoDB(db),
         indicator_set_repo=IndicatorSetRepositoryMongoDB(db),
+    )
+
+
+def _to_stream_read_dto(stream) -> IngestionStreamReadOutDTO:
+    """
+    Convert an ingestion stream entity into a read-only DTO with computed stream_key.
+    """
+    stream_key = StreamKeyService.build(
+        source=stream.source_name,
+        symbol=stream.symbol,
+        interval=stream.interval,
+        pool_address=stream.pool_address,
+    )
+    return IngestionStreamReadOutDTO(
+        stream_key=stream_key,
+        **stream.model_dump(),
     )
 
 
@@ -36,10 +57,10 @@ async def create_indicator_set(
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> IndicatorSetOutDTO:
     """
-    Create (or reuse) an ACTIVE indicator set.
+    Create or reuse an ACTIVE indicator set.
 
-    This endpoint is safe to call multiple times with the same params:
-    it will always return the same cfg_hash.
+    This endpoint is idempotent for the same parameter set and always
+    returns the same cfg_hash for the same stream and indicator configuration.
     """
     try:
         uc = get_use_case(db)
@@ -94,14 +115,77 @@ async def get_indicator_set(
     return IndicatorSetOutDTO.model_validate(ent.model_dump())
 
 
+@router.get("/streams", response_model=List[IngestionStreamReadOutDTO])
+async def list_enabled_market_streams(
+    source_name: Optional[str] = Query(None, description="Optional source_name filter, e.g. binance"),
+    symbol: Optional[str] = Query(None, description="Optional symbol filter, e.g. BTCUSDT"),
+    interval: Optional[str] = Query(None, description="Optional interval filter, e.g. 1m"),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> List[IngestionStreamReadOutDTO]:
+    """
+    List enabled ingestion streams and expose their computed stream_key.
+
+    This route is useful for operational inspection and for downstream services
+    that need to discover the exact stream_key used by api-market-data.
+    """
+    try:
+        repo = IngestionStreamRepositoryMongoDB(db)
+        await repo.ensure_indexes()
+
+        items = await repo.list_enabled()
+
+        source_name_norm = source_name.strip().lower() if source_name else None
+        symbol_norm = symbol.strip().upper() if symbol else None
+        interval_norm = interval.strip().lower() if interval else None
+
+        filtered = []
+        for item in items:
+            if source_name_norm and str(item.source_name).lower() != source_name_norm:
+                continue
+            if symbol_norm and str(item.symbol).upper() != symbol_norm:
+                continue
+            if interval_norm and str(item.interval).lower() != interval_norm:
+                continue
+            filtered.append(_to_stream_read_dto(item))
+
+        return filtered
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list ingestion streams: {exc}") from exc
+
+
+@router.get("/streams/{stream_key}", response_model=IngestionStreamReadOutDTO)
+async def get_enabled_market_stream(
+    stream_key: str,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> IngestionStreamReadOutDTO:
+    """
+    Fetch a single enabled ingestion stream by its computed stream_key.
+    """
+    try:
+        repo = IngestionStreamRepositoryMongoDB(db)
+        await repo.ensure_indexes()
+
+        items = await repo.list_enabled()
+        for item in items:
+            dto = _to_stream_read_dto(item)
+            if dto.stream_key == stream_key:
+                return dto
+
+        raise HTTPException(status_code=404, detail="Enabled ingestion stream not found.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch ingestion stream: {exc}") from exc
+
+
 @router.get("/candles", response_model=List[CandleOutDTO])
 async def list_candles(
-    stream_key: str = Query(..., description="e.g. binance:BTCUSDT:1m"),
+    stream_key: str = Query(..., description="e.g. binance:btcusdt:1m"),
     limit: int = Query(500, ge=1, le=5000),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> List[CandleOutDTO]:
     """
-    List latest closed candles for a stream_key.
+    List the latest closed candles for a stream_key in ascending time order.
     """
     uc = get_use_case(db)
     await uc.ensure_indexes()
@@ -110,15 +194,33 @@ async def list_candles(
     return [CandleOutDTO.model_validate(c.model_dump()) for c in candles]
 
 
+@router.get("/candles/latest", response_model=CandleOutDTO)
+async def get_latest_candle(
+    stream_key: str = Query(..., description="e.g. binance:btcusdt:1m"),
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> CandleOutDTO:
+    """
+    Fetch the latest closed candle for a stream_key.
+    """
+    uc = get_use_case(db)
+    await uc.ensure_indexes()
+
+    candles = await uc.list_candles(stream_key=stream_key, limit=1)
+    if not candles:
+        raise HTTPException(status_code=404, detail="No closed candles found for stream_key.")
+
+    return CandleOutDTO.model_validate(candles[-1].model_dump())
+
+
 @router.get("/indicators", response_model=List[IndicatorSnapshotOutDTO])
 async def list_indicators(
-    stream_key: str = Query(..., description="e.g. binance:BTCUSDT:1m"),
+    stream_key: str = Query(..., description="e.g. binance:btcusdt:1m"),
     cfg_hash: Optional[str] = Query(None, description="Filter by indicator-set cfg_hash"),
     limit: int = Query(500, ge=1, le=5000),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ) -> List[IndicatorSnapshotOutDTO]:
     """
-    List latest indicator snapshots for a stream_key (optionally filtered by cfg_hash).
+    List the latest indicator snapshots for a stream_key, optionally filtered by cfg_hash.
     """
     uc = get_use_case(db)
     await uc.ensure_indexes()
@@ -137,7 +239,9 @@ async def list_price_ticks(
 ) -> List[PriceTickOutDTO]:
     """
     List price ticks in an arbitrary time range.
-    Used by APR calculations (in-range seconds) and analytics.
+
+    This route is used by analytics and can also help with debugging
+    candle construction for a given stream.
     """
     try:
         repo = PriceTickRepositoryMongoDB(db)

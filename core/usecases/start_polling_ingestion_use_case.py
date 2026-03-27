@@ -14,14 +14,11 @@ from core.usecases.compute_indicators_use_case import ComputeIndicatorsUseCase
 
 class StartPollingIngestionUseCase:
     """
-    Starts a polling-based ingestion loop (e.g. The Graph, REST snapshots, etc).
+    Start a polling-based ingestion loop and persist synthetic closed candles.
 
-    Each tick produces a synthetic 1m candle for the configured stream_key:
-      - open_time/close_time aligned to minute boundaries (UTC)
-      - close price derived from the polled spot price
-      - if only one sample is available per minute, OHLC defaults to close (and previous close for open if possible)
-
-    This is designed to run concurrently with other sources for the same market/pair.
+    This use case supports two downstream notification flows:
+    - generic stream-based trade candle-closed notifications
+    - indicator-based LP candle-closed notifications
     """
 
     def __init__(
@@ -33,7 +30,7 @@ class StartPollingIngestionUseCase:
         interval: str,
         poll_every_s: float,
         candle_repository: CandleRepository,
-        processing_offset_repository: Any,  # optional; can be a real offset repo later
+        processing_offset_repository: Any,
         fetch_fn,
         compute_indicators_use_case: Optional[ComputeIndicatorsUseCase] = None,
         indicator_set_repo: Optional[IndicatorSetRepository] = None,
@@ -41,6 +38,24 @@ class StartPollingIngestionUseCase:
         logger: logging.Logger | None = None,
         static_candle_fields: Optional[Dict[str, Any]] = None,
     ):
+        """
+        Initialize the polling ingestion use case.
+
+        Args:
+            stream_key: Canonical stream identifier.
+            source: Source label.
+            symbol: Traded symbol or synthetic symbol.
+            interval: Candle interval.
+            poll_every_s: Polling frequency in seconds.
+            candle_repository: Candle persistence repository.
+            processing_offset_repository: Optional future offset repository.
+            fetch_fn: Async function that fetches the latest price/state.
+            compute_indicators_use_case: Optional indicator computation use case.
+            indicator_set_repo: Optional repository of active indicator sets.
+            signals_client: Optional HTTP client used to notify api-signals.
+            logger: Optional logger instance.
+            static_candle_fields: Optional static fields merged into stored candles.
+        """
         self._stream_key = str(stream_key)
         self._source = str(source)
         self._symbol = str(symbol)
@@ -60,13 +75,20 @@ class StartPollingIngestionUseCase:
 
     async def start(self) -> None:
         """
-        Start the polling loop as an asyncio task.
+        Start the polling loop as a background asyncio task.
         """
         if self._task and not self._task.done():
             return
 
         async def _loop() -> None:
-            self._logger.info("Starting polling ingestion stream_key=%s poll_every_s=%s", self._stream_key, self._poll_every_s)
+            """
+            Internal polling loop task.
+            """
+            self._logger.info(
+                "Starting polling ingestion stream_key=%s poll_every_s=%s",
+                self._stream_key,
+                self._poll_every_s,
+            )
             while True:
                 try:
                     await self._tick_once()
@@ -86,7 +108,8 @@ class StartPollingIngestionUseCase:
 
     async def _tick_once(self) -> None:
         """
-        Fetch current state/price and build a synthetic 1m candle.
+        Fetch the latest market state, build a synthetic closed candle,
+        persist it, and notify downstream services.
         """
         fetched: Dict[str, Any] = await self._fetch_fn()
         price = float(fetched["price"])
@@ -95,9 +118,9 @@ class StartPollingIngestionUseCase:
         close_time = int(now.replace(second=0, microsecond=0).timestamp() * 1000)
         open_time = close_time - 60_000
 
-        o = float(self._last_close) if self._last_close is not None else price
-        h = max(o, price)
-        l = min(o, price)
+        open_price = float(self._last_close) if self._last_close is not None else price
+        high_price = max(open_price, price)
+        low_price = min(open_price, price)
 
         candle = CandleEntity(
             stream_key=self._stream_key,
@@ -106,9 +129,9 @@ class StartPollingIngestionUseCase:
             interval=self._interval,
             open_time=open_time,
             close_time=close_time,
-            open=o,
-            high=h,
-            low=l,
+            open=open_price,
+            high=high_price,
+            low=low_price,
             close=price,
             volume=float(fetched.get("volume", 0.0) or 0.0),
             trades=int(fetched.get("trades", 0) or 0),
@@ -116,36 +139,35 @@ class StartPollingIngestionUseCase:
             raw_event_id=str(fetched.get("raw_event_id") or ""),
         )
 
-        # Apply extra metadata fields
-        for k, v in (fetched.get("candle_fields") or {}).items():
-            setattr(candle, k, v)
+        for key, value in (fetched.get("candle_fields") or {}).items():
+            setattr(candle, key, value)
 
-        for k, v in self._static_fields.items():
-            setattr(candle, k, v)
+        for key, value in self._static_fields.items():
+            setattr(candle, key, value)
 
         await self._candle_repo.upsert_closed_candle(candle)
         self._last_close = price
 
-        # Compute indicators + push triggers
-        if self._compute_indicators is not None and self._indicator_set_repo is not None:
-            active_sets = await self._indicator_set_repo.get_active_by_stream(self._stream_key)
-            for indset in active_sets:
-                snapshot = await self._compute_indicators.execute_for_indicator_set(
-                    stream_key=self._stream_key,
-                    ema_fast=int(indset.ema_fast),
-                    ema_slow=int(indset.ema_slow),
-                    atr_window=int(indset.atr_window),
-                    indicator_set_id=indset.cfg_hash,
-                    cfg_hash=indset.cfg_hash,
-                    ts=close_time,
-                )
-                if self._signals_client is not None and snapshot is not None:
-                    # fire-and-forget to avoid blocking polling
-                    asyncio.create_task(
-                        self._signals_client.candle_closed(
-                            indicator_set_id=indset.cfg_hash,
-                            ts=close_time,
-                            indicator_set=indset.to_dict(),
-                            indicator_snapshot=snapshot.to_dict(),
-                        )
+        if self._compute_indicators is None or self._indicator_set_repo is None:
+            return
+
+        active_sets = await self._indicator_set_repo.get_active_by_stream(self._stream_key)
+        for indset in active_sets:
+            snapshot = await self._compute_indicators.execute_for_indicator_set(
+                stream_key=self._stream_key,
+                ema_fast=int(indset.ema_fast),
+                ema_slow=int(indset.ema_slow),
+                atr_window=int(indset.atr_window),
+                indicator_set_id=indset.cfg_hash,
+                cfg_hash=indset.cfg_hash,
+                ts=close_time,
+            )
+            if self._signals_client is not None and snapshot is not None:
+                asyncio.create_task(
+                    self._signals_client.candle_closed(
+                        indicator_set_id=indset.cfg_hash,
+                        ts=close_time,
+                        indicator_set=indset.to_dict(),
+                        indicator_snapshot=snapshot.to_dict(),
                     )
+                )

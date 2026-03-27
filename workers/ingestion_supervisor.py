@@ -33,7 +33,6 @@ from core.usecases.build_candle_from_ticks_use_case import BuildCandleFromTicksU
 from core.usecases.compute_indicators_use_case import ComputeIndicatorsUseCase
 from core.usecases.start_polling_ticks_use_case import StartPollingTicksUseCase
 from core.usecases.start_realtime_ingestion_use_case import StartRealtimeIngestionUseCase
-from core.usecases.start_polling_ingestion_use_case import StartPollingIngestionUseCase
 
 
 class IngestionSupervisor:
