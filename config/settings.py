@@ -26,8 +26,13 @@ class Settings:
     MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb://mongo-market-data:27017")
     MONGODB_DB_NAME: str = os.getenv("MONGODB_DB_NAME", "api_market_data")
 
-    # Fallback only (if Mongo system_config not defined yet)
+    # Fallback only for the LP indicator notification flow
     SIGNALS_BASE_URL: str = os.getenv("SIGNALS_BASE_URL", "http://host.docker.internal:8080")
+
+    # Redis
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://host.docker.internal:6379/0")
+    REDIS_TRADE_CANDLE_STREAM: str = os.getenv("REDIS_TRADE_CANDLE_STREAM", "trade.candle.closed.v1")
+    REDIS_STREAM_MAXLEN: int = int(os.getenv("REDIS_STREAM_MAXLEN", "50000"))
 
     # Bootstrap defaults (optional; used only if Mongo has no ingestion_streams yet)
     BOOTSTRAP_BINANCE_WS_BASE_URL: str = os.getenv("BOOTSTRAP_BINANCE_WS_BASE_URL", "wss://stream.binance.com:9443")

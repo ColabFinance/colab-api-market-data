@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Optional
 
 import httpx
@@ -25,6 +26,7 @@ class SignalsHttpClient:
         self._base_url = str(base_url).rstrip("/")
         self._timeout = httpx.Timeout(timeout_s, connect=5.0)
         self._client = httpx.AsyncClient(timeout=self._timeout)
+        self._logger = logging.getLogger(self.__class__.__name__)
 
     async def aclose(self) -> None:
         """
@@ -110,6 +112,16 @@ class SignalsHttpClient:
         Returns:
             Parsed JSON response body.
         """
-        response = await self._client.post(f"{self._base_url}{path}", json=payload)
-        response.raise_for_status()
-        return response.json()
+        url = f"{self._base_url}{path}"
+
+        try:
+            response = await self._client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as exc:
+            self._logger.warning(
+                "Signals HTTP request failed. url=%s err=%s",
+                url,
+                exc,
+            )
+            raise
