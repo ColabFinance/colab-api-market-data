@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Dict, List, cast
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from redis.asyncio.client import Redis
 
 from adapters.external.database.candle_repository_mongodb import CandleRepositoryMongoDB
 from adapters.external.database.indicator_repository_mongodb import IndicatorRepositoryMongoDB
@@ -12,17 +13,15 @@ from adapters.external.database.indicator_set_repository_mongodb import Indicato
 from adapters.external.database.price_tick_repository_mongodb import PriceTickRepositoryMongoDB
 from adapters.external.database.processing_offset_repository_mongodb import ProcessingOffsetRepositoryMongoDB
 from adapters.external.database.mongodb_client import get_mongo_client
-
 from adapters.external.database.ingestion_stream_repository_mongodb import IngestionStreamRepositoryMongoDB
 from adapters.external.database.system_config_repository_mongodb import SystemConfigRepositoryMongoDB
-
+from adapters.external.database.token_registry_repository_mongodb import TokenRegistryRepositoryMongoDB
 from adapters.external.binance.binance_rest_client import BinanceRestClient
 from adapters.external.binance.binance_websocket_client import BinanceWebsocketClient
-from adapters.external.database.token_registry_repository_mongodb import TokenRegistryRepositoryMongoDB
+from adapters.external.redis.redis_client import get_redis_client
+from adapters.external.redis.trade_candle_stream_publisher import TradeCandleStreamPublisher
 from adapters.external.signals.signals_http_client import SignalsHttpClient
-
 from adapters.external.thegraph.pancakeswap_v3_base_pool_client import PancakeSwapV3BasePoolClient
-
 from config.settings import settings
 from core.domain.entities.ingestion_stream_entity import IngestionStreamEntity
 from core.domain.entities.system_config_entity import SystemConfigEntity
@@ -41,6 +40,7 @@ class IngestionSupervisor:
 
     Responsibilities:
     - Connect to MongoDB and ensure indexes.
+    - Connect to Redis and prepare the trade candle publisher.
     - Load system_config and ingestion_streams from MongoDB.
     - Start multiple ingestion pipelines concurrently (Binance WS, TheGraph poll, etc.).
     - Keep backward compatibility by bootstrapping Binance config from .env if DB is empty.
@@ -50,8 +50,10 @@ class IngestionSupervisor:
         self._logger = logging.getLogger(self.__class__.__name__)
         self._mongo_client: AsyncIOMotorClient | None = None
         self._db: AsyncIOMotorDatabase | None = None
+        self._redis_client: Redis | None = None
 
         self._signals_client: SignalsHttpClient | None = None
+        self._trade_candle_publisher: TradeCandleStreamPublisher | None = None
 
         self._ws_clients: List[BinanceWebsocketClient] = []
         self._ws_ingestions: List[StartRealtimeIngestionUseCase] = []
@@ -68,7 +70,7 @@ class IngestionSupervisor:
 
     async def start(self) -> None:
         """
-        Initialize DB, ensure indexes, load configs from Mongo, and start ingestion.
+        Initialize DB, ensure indexes, connect to Redis, load configs from Mongo, and start ingestion.
         """
         self._mongo_client = get_mongo_client()
         self._db = self._mongo_client[settings.MONGODB_DB_NAME]
@@ -79,7 +81,7 @@ class IngestionSupervisor:
         indicator_repo = IndicatorRepositoryMongoDB(self._db)
         indicator_set_repo = IndicatorSetRepositoryMongoDB(self._db)
         tick_repo = PriceTickRepositoryMongoDB(self._db)
-        
+
         await tick_repo.ensure_indexes()
         await candle_repo.ensure_indexes()
         await offset_repo.ensure_indexes()
@@ -94,7 +96,7 @@ class IngestionSupervisor:
         # Token registry (for on-demand pricing)
         token_registry_repo = TokenRegistryRepositoryMongoDB(self._db)
         await token_registry_repo.ensure_indexes()
-        
+
         # Ensure runtime config exists (or create fallback)
         runtime_cfg = await system_repo.get_runtime()
         if runtime_cfg is None:
@@ -105,6 +107,15 @@ class IngestionSupervisor:
                 extras={},
             )
             await system_repo.upsert_runtime(runtime_cfg)
+
+        self._redis_client = get_redis_client()
+        await cast(Awaitable[bool], self._redis_client.ping())
+        self._trade_candle_publisher = TradeCandleStreamPublisher(
+            redis_client=self._redis_client,
+            stream_name=settings.REDIS_TRADE_CANDLE_STREAM,
+            maxlen=settings.REDIS_STREAM_MAXLEN,
+            logger=self._logger,
+        )
 
         self._signals_client = SignalsHttpClient(base_url=runtime_cfg.signals_base_url, timeout_s=30.0)
 
@@ -147,20 +158,22 @@ class IngestionSupervisor:
         # Start poll loops
         for t in self._tick_pollers:
             t.start()
-    
-        self._logger.info("All ingestion streams started. ws=%s poll=%s", len(self._ws_ingestions), len(self._tick_pollers))
+
+        self._logger.info(
+            "All ingestion streams started. ws=%s poll=%s redis_stream=%s",
+            len(self._ws_ingestions),
+            len(self._tick_pollers),
+            settings.REDIS_TRADE_CANDLE_STREAM,
+        )
 
     async def stop(self) -> None:
         """
         Stop pollers, websocket clients, and close external clients.
         """
-        # for p in self._poll_ingestions:
-        #     with contextlib.suppress(Exception):
-        #         await p.stop()
         for t in self._tick_pollers:
             with contextlib.suppress(Exception):
                 await t.stop()
-                
+
         for ws in self._ws_clients:
             with contextlib.suppress(Exception):
                 await ws.close()
@@ -173,6 +186,11 @@ class IngestionSupervisor:
             with contextlib.suppress(Exception):
                 await self._signals_client.aclose()
             self._signals_client = None
+
+        if self._redis_client is not None:
+            with contextlib.suppress(Exception):
+                await self._redis_client.aclose()
+            self._redis_client = None
 
         if self._mongo_client:
             self._mongo_client.close()
@@ -282,7 +300,7 @@ class IngestionSupervisor:
             symbol=stream.symbol,
             interval=stream.interval,
         )
-                
+
         uc = StartRealtimeIngestionUseCase(
             stream_key=stream_key,
             source=stream.source_name,
@@ -294,6 +312,7 @@ class IngestionSupervisor:
             compute_indicators_use_case=compute_indicators_uc,
             indicator_set_repo=indicator_set_repo,
             signals_client=self._signals_client if stream.push_signals else None,
+            trade_candle_publisher=self._trade_candle_publisher if stream.push_signals else None,
         )
 
         self._ws_clients.append(ws_client)
@@ -407,14 +426,14 @@ class IngestionSupervisor:
         # how often to sample the pool price
         poll_every_s = float((stream.config or {}).get("poll_every_s") or 5.0)
         tick_repo = PriceTickRepositoryMongoDB(self._db)
-        
+
         build_candle_uc = BuildCandleFromTicksUseCase(
             tick_repository=tick_repo,
             candle_repository=candle_repo,
             logger=self._logger,
             delete_ticks_after_build=False,
         )
-                
+
         tick_poller = StartPollingTicksUseCase(
             stream_key=stream_key,
             source=stream.source_name,
